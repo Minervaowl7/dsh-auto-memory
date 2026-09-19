@@ -23,3 +23,10 @@ _tmp-e5/
 __pycache__/
 artifacts/release-c2-asset-pack/package/
 artifacts/release-c2-asset-pack/*.tgz
+
+# 本地工具产物(2026-09-19 盘点):索引/扫描/测试运行状态不入库
+.codegraph/
+.mimosa/
+.bug-hunter/
+artifacts/baseline-*.txt
+artifacts/release-c2-asset-pack/e2e-node_modules/
