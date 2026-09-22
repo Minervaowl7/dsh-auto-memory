@@ -1,24 +1,75 @@
-name: Isolated audit source snapshot
+name: Validate and publish audited repair branch
 on:
   push:
     branches: [audit/snapshot-20260922]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  snapshot:
+  publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - name: Read immutable transport commit
+        uses: actions/checkout@v4
         with:
-          repository: Aik358/dsh-auto-memory
-          ref: 9e14f32f28f86293b64d7a9a953eb81cf62ba11c
+          ref: ${{ github.sha }}
+          path: transport
           persist-credentials: false
-      - name: Archive exact upstream source
-        run: git archive --format=tar HEAD > audit-source.tar
-      - uses: actions/upload-artifact@v4
+      - name: Check out repair branch
+        uses: actions/checkout@v4
         with:
-          name: audit-source-9e14f32
-          path: audit-source.tar
-          retention-days: 1
-          if-no-files-found: error
+          ref: fix/repo-audit-20260922
+          path: repair
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+      - name: Verify and apply exact tested patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat transport/.audit/full-repo.patch.xz.1 transport/.audit/full-repo.patch.xz.2 | xz -dc > "$RUNNER_TEMP/repair.patch"
+          echo "631cdcf2afd751c88503918a42e74e75bdc176f7ad0ce3095276a00f750b996c  $RUNNER_TEMP/repair.patch" | sha256sum -c -
+          cd repair
+          test "$(git rev-parse HEAD)" = 9e14f32f28f86293b64d7a9a953eb81cf62ba11c
+          git apply --check --unidiff-zero "$RUNNER_TEMP/repair.patch"
+          git apply --index --unidiff-zero "$RUNNER_TEMP/repair.patch"
+          git diff --cached --check
+          test "$(git write-tree)" = 01dc85a8093f8a884b2764e49f2628afc5b15ad3
+          git diff --cached --stat
+      - name: Run offline audit regressions and existing guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd repair
+          export NODE_NO_WARNINGS=1
+          for suite in audit-runtime audit-client audit-download-integrity v313-guide-sessname continue-chain issue103-105-portfix; do
+            isolated=$(mktemp -d)
+            echo "=== $suite ===" | tee -a "$RUNNER_TEMP/audit-checks.log"
+            HOME="$isolated" USERPROFILE="$isolated" DSH_HOME="$isolated/.dsh" node "tests/smoke/smoke-test-$suite-pre.mjs" 2>&1 | tee -a "$RUNNER_TEMP/audit-checks.log"
+            rm -rf "$isolated"
+          done
+          git diff --exit-code
+          test "$(git write-tree)" = 01dc85a8093f8a884b2764e49f2628afc5b15ad3
+      - name: Commit and push repair only
+        working-directory: repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -c core.hooksPath=/dev/null commit -m 'fix(audit): repair runtime wiring, disposal and download integrity; trim private dead code'
+          test "$(git rev-parse HEAD^{tree})" = 01dc85a8093f8a884b2764e49f2628afc5b15ad3
+          git push origin HEAD:refs/heads/fix/repo-audit-20260922
+          printf '{"commit":"%s","tree":"%s","base":"9e14f32f28f86293b64d7a9a953eb81cf62ba11c"}\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" > "$RUNNER_TEMP/publication.json"
+          cat "$RUNNER_TEMP/publication.json"
+      - name: Preserve validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repo-audit-validation-20260922
+          path: |
+            ${{ runner.temp }}/audit-checks.log
+            ${{ runner.temp }}/publication.json
+          if-no-files-found: warn
+          retention-days: 7
