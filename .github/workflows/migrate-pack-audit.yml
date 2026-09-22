@@ -5,7 +5,51 @@ on:
 permissions:
   contents: read
 jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    timeout-minutes: 5
+    outputs:
+      commit: ${{ steps.commit.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/migrate-pack-preservation-20260922
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply the verified one-line parser fix on the authorized fork branch
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = 49fea5125e34bb85b30ade46df26b2dc089bed17
+          test "$(git hash-object lib/index.js)" = 82054989056525864be54ab066587a6461c160d3
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('lib/index.js')
+          text = p.read_text(encoding='utf-8')
+          old = r'(\d{1,2}:\d{2}) \| (重要紧急|重要不紧急|紧急不重要|不重要不紧急|未分类)'
+          new = r'(\d{1,2}:\d{2}|--:--) \| (重要紧急|重要不紧急|紧急不重要|不重要不紧急|未分类)'
+          assert text.count(old) == 1, 'unexpected source: refusing to patch'
+          p.write_text(text.replace(old, new), encoding='utf-8')
+          PY
+          node --check lib/index.js
+          node tests/smoke/smoke-test-migrate-pack-pre.mjs
+          node --test tests/smoke/smoke-test-migrate-pack-preservation-pre.mjs tests/smoke/smoke-test-calendar-untimed-pre.mjs
+          git diff --check
+          test "$(git diff --numstat)" = "$(printf '1\t1\tlib/index.js')"
+      - name: Commit only the verified parser line to the repair branch
+        id: commit
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/index.js
+          git commit -m 'fix(calendar): preserve untimed entries in normal calendar reads'
+          git push origin HEAD:refs/heads/fix/migrate-pack-preservation-20260922
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   focused:
+    needs: patch
     strategy:
       fail-fast: false
       matrix:
@@ -15,22 +59,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.patch.outputs.commit }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - name: Existing migration smoke
         run: node tests/smoke/smoke-test-migrate-pack-pre.mjs
-      - name: New behavioral regressions
+      - name: New migration and actual host calendar regressions
         if: always()
-        run: node --test tests/smoke/smoke-test-migrate-pack-preservation-pre.mjs
+        run: node --test tests/smoke/smoke-test-migrate-pack-preservation-pre.mjs tests/smoke/smoke-test-calendar-untimed-pre.mjs
   compare:
+    needs: patch
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 3
+          ref: ${{ needs.patch.outputs.commit }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -68,11 +115,11 @@ jobs:
               for label, name, code in pool.map(run_one, items):
                   results[label][name] = code
           new_failures = [n for n in selected if results['baseline'][n] == 0 and results['candidate'][n] != 0]
-          report = {'base': '9e14f32f28f86293b64d7a9a953eb81cf62ba11c', 'candidate': 'fd6afaebd41e6c7c71b1eabb74004fb4b3148720', 'selected': len(selected), 'excluded': skipped, 'new_failures': new_failures, 'results': results}
+          sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          report = {'base': '9e14f32f28f86293b64d7a9a953eb81cf62ba11c', 'candidate': sha, 'selected': len(selected), 'excluded': skipped, 'new_failures': new_failures, 'results': results}
           for label in results:
               report[label + '_failures'] = [n for n, c in results[label].items() if c != 0]
           (out / 'report.json').write_text(json.dumps(report, indent=2))
-          (out / 'source-index.js').write_bytes((candidate / 'lib/index.js').read_bytes())
           print(json.dumps({k: v for k, v in report.items() if k != 'results'}, indent=2), flush=True)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write('## Migration audit comparison\n\n' + json.dumps({k: v for k, v in report.items() if k != 'results'}, indent=2))
@@ -81,6 +128,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: migration-audit-results
+          name: migration-calendar-audit-results
           path: audit-results/
           retention-days: 7
