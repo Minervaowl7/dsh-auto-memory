@@ -1,0 +1,24 @@
+name: Isolated audit source snapshot
+on:
+  push:
+    branches: [audit/snapshot-20260922]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Aik358/dsh-auto-memory
+          ref: 9e14f32f28f86293b64d7a9a953eb81cf62ba11c
+          persist-credentials: false
+      - name: Archive exact upstream source
+        run: git archive --format=tar HEAD > audit-source.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audit-source-9e14f32
+          path: audit-source.tar
+          retention-days: 1
+          if-no-files-found: error
