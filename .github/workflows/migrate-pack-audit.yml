@@ -1,0 +1,86 @@
+name: Migration preservation audit
+on:
+  push:
+    branches: [audit/migrate-pack-validation-20260922]
+permissions:
+  contents: read
+jobs:
+  focused:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Existing migration smoke
+        run: node tests/smoke/smoke-test-migrate-pack-pre.mjs
+      - name: New behavioral regressions
+        if: always()
+        run: node --test tests/smoke/smoke-test-migrate-pack-preservation-pre.mjs
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Compare identical smoke selection against upstream baseline
+        shell: bash
+        run: |
+          git worktree add --detach ../audit-baseline 9e14f32f28f86293b64d7a9a953eb81cf62ba11c
+          python3 - <<'PY'
+          import concurrent.futures, json, os, pathlib, subprocess, tempfile
+          candidate = pathlib.Path.cwd()
+          baseline = candidate.parent / 'audit-baseline'
+          out = candidate / 'audit-results'
+          out.mkdir()
+          exclusions = ['-live-', 'm79-feature-v2', 'm710-fv2-emit', 'c4-fresh-install']
+          names = sorted(p.name for p in (baseline / 'tests/smoke').glob('*.mjs'))
+          skipped = {n: next(x for x in exclusions if x in n) for n in names if any(x in n for x in exclusions)}
+          selected = [n for n in names if n not in skipped]
+          (out / 'selection.json').write_text(json.dumps({'selected': selected, 'skipped': skipped}, indent=2))
+          def run_one(item):
+              label, root, name = item
+              with tempfile.TemporaryDirectory(prefix='dam-smoke-') as home:
+                  env = {**os.environ, 'DSH_HOME': str(pathlib.Path(home) / '.dsh'), 'HOME': home, 'USERPROFILE': home}
+                  try:
+                      r = subprocess.run(['node', str(root / 'tests/smoke' / name)], cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=90)
+                      code, data = r.returncode, r.stdout
+                  except subprocess.TimeoutExpired as e:
+                      code, data = 124, (e.stdout or b'') + b'\nTIMEOUT\n'
+              (out / (label + '-' + name + '.log')).write_bytes(data)
+              print(label, name, code, flush=True)
+              return label, name, code
+          items = [(label, root, n) for label, root in [('baseline', baseline), ('candidate', candidate)] for n in selected]
+          results = {'baseline': {}, 'candidate': {}}
+          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+              for label, name, code in pool.map(run_one, items):
+                  results[label][name] = code
+          new_failures = [n for n in selected if results['baseline'][n] == 0 and results['candidate'][n] != 0]
+          report = {'base': '9e14f32f28f86293b64d7a9a953eb81cf62ba11c', 'candidate': 'fd6afaebd41e6c7c71b1eabb74004fb4b3148720', 'selected': len(selected), 'excluded': skipped, 'new_failures': new_failures, 'results': results}
+          for label in results:
+              report[label + '_failures'] = [n for n, c in results[label].items() if c != 0]
+          (out / 'report.json').write_text(json.dumps(report, indent=2))
+          (out / 'source-index.js').write_bytes((candidate / 'lib/index.js').read_bytes())
+          print(json.dumps({k: v for k, v in report.items() if k != 'results'}, indent=2), flush=True)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('## Migration audit comparison\n\n' + json.dumps({k: v for k, v in report.items() if k != 'results'}, indent=2))
+          raise SystemExit(bool(new_failures))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: migration-audit-results
+          path: audit-results/
+          retention-days: 7
