@@ -23,7 +23,18 @@
     "!**/node_modules",
     "!**/*.bak*",
     "!lib/*.m8b*bak*",
-    "!lib/*.*.*"
+    "!lib/*.*.*",
+    "!lib/assets/skin/slots/hero.welcome.png",
+    "!lib/assets/skin/slots/hero.welcome-memory-v2.png",
+    "!lib/assets/skin/slots/empty.library.png",
+    "!lib/assets/skin/slots-dark/hero.welcome.webp",
+    "!skins/iter5",
+    "!skins/legacy",
+    "!lib/assets/skin/backgrounds",
+    "!lib/assets/skin/backgrounds-dark",
+    "!lib/assets/skin/elements",
+    "!lib/assets/skin/icons",
+    "!lib/assets/skin/refs"
   ],
   "dsh": {
     "bundle": {
